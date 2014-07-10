@@ -1,0 +1,170 @@
+#!/bin/bash
+
+#############################################################################################
+#############################################################################################
+##
+## FUNCTIONS
+##
+#############################################################################################
+#############################################################################################
+
+createServices(){
+
+    HOST_COMMAND=$TENANT"_"$COMMAND_NAME
+    METADATA_FILE_SERVICES_TEMP="
+
+define service {
+        use                     ulak-main-service
+        contact_groups          $HOST_CONTACT
+        check_command           $HOST_COMMAND
+        hostgroup_name          $HOSTGROUP_NAME
+        normal_check_interval   1
+        service_description     $COMMAND_DESCRPITION
+        }
+
+define command {
+        command_name            $HOST_COMMAND
+        command_line            \$USER1\$/$COMMAND_ITSELF
+        }
+"
+}
+
+##
+## createMetadataFile
+##
+# 	This function create metadata file by using "commandList.cfg"
+#	commandList.cfg file example 
+#		commandName;command_Itself_with_parameters;commandDescription
+createMetadataFile(){
+
+    METADATA_FILE_MAIN="
+#### DO NOT EDIT. CREATED BY AUTO CONFIGURATION! ####
+define contactgroup{
+        contactgroup_name       $HOST_CONTACT
+        alias                   Tenant Contact Group
+        members                 nagiosadmin, $OS_USERNAME
+        }
+
+define contact{
+        contact_name                    $OS_USERNAME
+        use                             generic-contact
+        alias                           $NAGIOS_USER_NAME
+        email                           $NAGIOS_USER_EMAIL
+        }
+
+define host{
+        use                     ulak-main-host
+        name                    $HOST_NAME
+        contact_groups          $HOST_CONTACT
+	_tenant_file            $CREDENTIAL
+        }
+
+define hostgroup{
+        hostgroup_name          $HOSTGROUP_NAME
+        alias                   $HOSTGROUP_ALIAS
+        members                 $NOVA_LIST
+        }"
+
+    # COMMAND_NAME will be taken from "commandFiles.cfg
+    while read line           
+    do
+    	COMMAND_NAME=`echo $line | awk -F ';' '{print $1; end}' | tr -d ' '`
+   	COMMAND_ITSELF=`echo $line | awk -F ';' '{print $2; end}'`
+    	COMMAND_DESCRPITION=`echo $line | awk -F ';' '{print $3; end}'`
+    	createServices
+    	METADATA_FILE_MAIN=$METADATA_FILE_MAIN" "$METADATA_FILE_SERVICES_TEMP
+    done <$PATH_COMMAND_FILE
+
+}
+
+
+#############################################################################################
+#############################################################################################
+##
+## MAIN METHOD
+##
+#############################################################################################
+#############################################################################################
+
+# This script check regularly the instances launched Open Stack and the hosts regitered into Nagios.
+# If there is a change on Open Stack such as adding or removing a new host, it will detects the changes
+# and prepare proper configuration files for Nagios. After restarting Nagios, the changes will be reflected
+# into tenant's users.
+
+# USAGE: ./service_instance_list <credential_file_name>
+
+CREDENTIAL=$1
+. $CREDENTIAL
+TENANT=$OS_TENANT_NAME
+
+export OS_USERNAME="$OS_USERNAME"
+export OS_PASSWORD="$OS_PASSWORD"
+export OS_TENANT_NAME="$OS_TENANT_NAME"
+export OS_AUTH_URL="$OS_AUTH_URL"
+#export OS_REGION_NAME="$OS_REGION_NAME"
+export NAGIOS_USER_NAME="$NAGIOS_USER_NAME"
+export NAGIOS_USER_EMAIL="$NAGIOS_USER_EMAIL"
+
+HOST_NAME=$TENANT"_group"					# -- template name for hosts --
+HOST_CONTACT=$TENANT"_contact"					# -- main contact group name --
+HOSTGROUP_NAME=$TENANT"_hostgroup"
+HOSTGROUP_ALIAS=$TENANT"_alias"
+HOST_COMMAND_CEILOMETER=$TENANT"_command_ceilometer"
+
+FILE_NAME_METADATA=$TENANT"_metadata.cfg"
+FILE_NAME_HOSTS=$TENANT"_hosts.cfg"
+MY_PATH=/usr/local/nagios/etc/objects/mynagios
+PATH_CRED=/usr/local/nagios/libexec
+PATH_COMMAND_FILE=/usr/local/nagios/etc/objects/mynagios/commandFiles.cfg
+
+# VARIABLE
+METADATA_FILE_MAIN=""
+
+# CODING PART
+# CODING PART
+
+echo -n "getting nova instance list ..."
+nova list | tr '(' '_'| tr ')' '_' > /tmp/nova_list.bak
+NOVA_LIST=`cat /tmp/nova_list.bak |tail -n +4|head -n -1|awk -F\| {'print $3'}| tr -d ' '|sort -u|sed ':a;N;$!ba;s/\n/,/g'`
+NOVA_HOST=`cat /tmp/nova_list.bak |tail -n +4|head -n -1|awk -F\| {'print $2"#"$3'}| tr -d ' '|sort -u|sed ':a;N;$!ba;s/\n/,/g'`
+rm -rf /tmp/nova_list.bak
+echo OK
+
+echo -n "getting nagios instance list ..."
+NAGIOS_LIST=`sed -n -e '/hostgroup/,$p' $MY_PATH/$FILE_NAME_METADATA |grep members|sort -u|awk {'print $2'}`
+echo OK
+
+echo "Current instance list: $NOVA_LIST"
+
+if [ "$NOVA_LIST" == "$NAGIOS_LIST" ]
+then
+	echo "No changes up to now"
+else
+	echo "A new instance is launched or terminated"
+        # prepare project metadata file
+
+	createMetadataFile
+	echo "$METADATA_FILE_MAIN" > $MY_PATH/$FILE_NAME_METADATA	
+	
+	echo "The configuration file for metadata was prepared: $MY_PATH/$FILE_NAME_METADATA"
+
+	# prepare project host file
+	echo "#### DO NOT EDIT. CREATED BY AUTO CONFIGURATION! ####" > $MY_PATH/$FILE_NAME_HOSTS
+	for i in `echo $NOVA_HOST| tr ',' ' '`; 
+	do 
+		instance_name=`echo $i|awk -F# {'print $2'}`
+		instance_alias=`echo $i|awk -F# {'print $1'}`
+		echo "
+define host{
+        use                     $HOST_NAME
+        host_name               $instance_name
+        alias                   $instance_alias
+	}
+		" >> $MY_PATH/$FILE_NAME_HOSTS
+	done	
+	echo "The configuration file for hosts was prepared: $MY_PATH/$FILE_NAME_HOSTS"
+
+	echo "Nagios service will be restarted"
+	service nagios restart
+	echo "Changes are applied successfully"
+fi

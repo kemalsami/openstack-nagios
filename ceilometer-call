@@ -1,0 +1,80 @@
+#!/bin/bash
+#initialization with default values
+#SERVICE='cpu_util'
+THRESHOLD='-1'
+#CRITICAL_THRESHOLD='80.0'
+
+#function to print the help info
+printusage()
+{
+        echo "This plug-in uses the OpenStack Ceilometer API to let Nagios query Ceilometer metrics of VMs."
+	echo "usage:"
+	echo "ceilometer-call -s metric_name -t nagios_warning_threshold -T nagios_critical_threshold"
+	echo "-h: print this message"
+	echo "-s service: The Ceilometer metric which you want to query"
+	echo "-t threshold: Threshold value which causes Nagios to create a warning message"
+	echo "-T threshold for alert: Threshold value which causes Nagios to send a critical alert message"
+	echo "-c configuration file for tenants"
+	echo "-r resourceid"
+	exit ${EXITPROB}
+}
+
+#parse the arguments
+while getopts ":hs:t:T:c:r:" opt
+do
+        case $opt in
+                h )     printusage;;
+                s )     SERVICE=${OPTARG};;
+                t )     THRESHOLD=${OPTARG};;
+                T )     CRITICAL_THRESHOLD=${OPTARG};;
+		c )	CREDENTIAL=${OPTARG};;
+		r )	RESOURCE=${OPTARG};;
+                ? )     printusage;;	
+        esac
+done
+
+
+#sanity check, THRESHOLD must be smaller than CRITICALTHRESHOLD
+#echo "Reading config...." >&2
+. $CREDENTIAL
+
+export OS_USERNAME="$OS_USERNAME"
+export OS_PASSWORD="$OS_PASSWORD"
+export OS_TENANT_NAME="$OS_TENANT_NAME"
+export OS_AUTH_URL="$OS_AUTH_URL"
+#export OS_REGION_NAME="$OS_REGION_NAME"
+
+############### THE PLUGIN ########
+# getting the last query rather than all historical ones
+mytime=`date --utc +"20%y-%m-%dT%T" --date '-10 min'`
+
+RETURNCODE=0
+RESOURCE_METER=`ceilometer meter-list -q "resource_id=$RESOURCE" | grep -w $SERVICE `
+
+METER_NAME=`echo $RESOURCE_METER | awk -F\|  {'print $2'}`
+METER_UNIT=`echo $RESOURCE_METER | awk -F\|  {'print $4'}`
+ACTUAL_VALUE=`ceilometer sample-list -m $METER_NAME -q "resource_id=$RESOURCE;timestamp>$mytime"| sed -n 4p| awk -F\| {'print $5'}| tr -d ' '`
+
+if [ $THRESHOLD != "-1" ]
+then
+
+	if [ $(echo "$ACTUAL_VALUE > $THRESHOLD" | bc) -eq 1 ]
+	then
+		if (( "$RETURNCODE" < "1" ))
+		then
+			RETURNCODE=1
+		fi
+		if [ $(echo "$ACTUAL_VALUE > $CRITICAL_THRESHOLD" | bc) -eq 1 ]
+		then
+			if (( "$RETURNCODE" < "2" ))
+			then
+				RETURNCODE=2
+			fi
+		fi
+	fi
+
+fi
+
+echo "Instance: $RESOURCE, $METER_NAME: $ACTUAL_VALUE, Return: $RETURNCODE | Load = $ACTUAL_VALUE"
+
+exit $RETURNCODE
